@@ -335,7 +335,7 @@ def get_group_photo_url(group_id):
         return url_for('static', filename='img/default_profile.png')
 
 def log_group_activity(group_id, action_type, actor, target=None, details=None):
-    """Log an activity in the group activity log."""
+    """Log an activity in the group activity log and send system message to chat."""
     try:
         import json
         details_str = json.dumps(details) if details else None
@@ -347,11 +347,90 @@ def log_group_activity(group_id, action_type, actor, target=None, details=None):
             details=details_str
         )
         db.session.add(activity)
+        
+        # Create system message for the group chat
+        system_message = create_activity_message(action_type, actor, target, details)
+        if system_message:
+            # Create a system message in the group chat
+            message = Message(
+                sender='System',
+                recipients=f'group-{group_id}',
+                content=encrypt_message(system_message),
+                group_id=group_id
+            )
+            db.session.add(message)
+        
         db.session.commit()
+        
+        # Emit the system message to group members via SocketIO if available
+        if system_message:
+            try:
+                from flask_socketio import emit
+                socketio.emit('new_message', {
+                    'sender': 'System',
+                    'content': system_message,
+                    'timestamp': message.timestamp.strftime('%Y-%m-%d %H:%M:%S'),
+                    'recipients': f'group-{group_id}',
+                    'message_id': message.id,
+                    'is_system': True
+                }, room=f'group-{group_id}')
+            except:
+                pass  # SocketIO might not be available in all contexts
+                
     except Exception as e:
         print(f"Error logging group activity: {e}")
         # Don't fail the main operation if logging fails
         pass
+
+def create_activity_message(action_type, actor, target=None, details=None):
+    """Create a human-readable system message for group activities."""
+    if action_type == 'member_added':
+        if details and details.get('is_admin'):
+            return f"👤 {actor} added {target} to the group as an admin"
+        return f"👤 {actor} added {target} to the group"
+    
+    elif action_type == 'member_removed':
+        return f"👤 {actor} removed {target} from the group"
+    
+    elif action_type == 'admin_status_changed':
+        if details and details.get('is_admin'):
+            return f"🛡️ {actor} made {target} an admin"
+        return f"🛡️ {actor} removed admin status from {target}"
+    
+    elif action_type == 'photo_updated':
+        return f"📷 {actor} updated the group photo"
+    
+    elif action_type == 'photo_removed':
+        return f"📷 {actor} removed the group photo"
+    
+    elif action_type == 'group_name_changed':
+        if details:
+            return f"✏️ {actor} changed group name from \"{details.get('old_name')}\" to \"{details.get('new_name')}\""
+        return f"✏️ {actor} changed the group name"
+    
+    elif action_type == 'description_added':
+        if details and details.get('description'):
+            return f"📝 {actor} added group description: \"{details.get('description')}\""
+        return f"📝 {actor} added a group description"
+    
+    elif action_type == 'description_changed':
+        if details:
+            return f"📝 {actor} changed group description from \"{details.get('old_description')}\" to \"{details.get('new_description')}\""
+        return f"📝 {actor} changed the group description"
+    
+    elif action_type == 'description_removed':
+        return f"📝 {actor} removed the group description"
+    
+    elif action_type == 'admin_only_changed':
+        if details and details.get('admin_only'):
+            return f"🔒 {actor} restricted messaging to admins only"
+        return f"🔓 {actor} allowed all members to send messages"
+    
+    elif action_type == 'group_created':
+        return f"🎉 {actor} created this group"
+    
+    # Return None for activities that shouldn't show in chat
+    return None
 
 # --- Routes ---
 @app.route('/')
@@ -539,21 +618,11 @@ def manage_account():
             flash('Password updated successfully.', 'success')
             return redirect(url_for('manage_account'))
     
-    # Get user statistics
-    total_messages = Message.query.filter_by(sender=session['username']).count()
-    total_files = File.query.filter_by(uploader=session['username']).count()
-    
-    # Get groups the user is a member of
-    user_groups = db.session.query(Group).join(GroupMember).filter(GroupMember.username == session['username']).all()
-    
     return render_template('dashboard.html', 
                          username=session['username'], 
                          host_ip=get_host_ip(), 
                          active_section='manage-account',
                          user=user,
-                         total_messages=total_messages,
-                         total_files=total_files,
-                         user_groups=user_groups,
                          message=message)
 
 @app.route('/profile_photo/<filename>')
@@ -1480,20 +1549,49 @@ def update_group_info(group_id):
     if not data:
         return jsonify({'error': 'Invalid JSON data'}), 400
     
+    # Store original values for activity logging
+    original_name = group.name
+    original_description = group.description
+    original_admin_only = group.admin_only
+    
     # Update fields if provided
     name = data.get('name')
     description = data.get('description')
     icon = data.get('icon')
     admin_only = data.get('admin_only')
     
-    if name:
+    username = session['username']
+    
+    # Log activity for name change
+    if name and name != original_name:
         group.name = name
-    if description is not None:  # Allow empty string to clear description
+        log_group_activity(group_id, 'group_name_changed', username, 
+                          details={'old_name': original_name, 'new_name': name})
+    
+    # Log activity for description change
+    if description is not None and description != original_description:
+        if original_description is None or original_description == '':
+            # Adding description
+            log_group_activity(group_id, 'description_added', username, 
+                              details={'description': description})
+        elif description == '':
+            # Removing description
+            log_group_activity(group_id, 'description_removed', username, 
+                              details={'old_description': original_description})
+        else:
+            # Changing description
+            log_group_activity(group_id, 'description_changed', username, 
+                              details={'old_description': original_description, 'new_description': description})
         group.description = description
+    
+    # Log activity for admin-only setting change
+    if admin_only is not None and bool(admin_only) != original_admin_only:
+        group.admin_only = bool(admin_only)
+        log_group_activity(group_id, 'admin_only_changed', username, 
+                          details={'admin_only': bool(admin_only)})
+    
     if icon:
         group.icon = icon
-    if admin_only is not None:  # Allow boolean values
-        group.admin_only = bool(admin_only)
     
     try:
         db.session.commit()
@@ -1932,13 +2030,22 @@ def get_group_activity(group_id):
     
     result = []
     for activity in activities:
+        # Parse JSON details if present
+        details = None
+        if activity.details:
+            try:
+                import json
+                details = json.loads(activity.details)
+            except:
+                details = activity.details
+        
         activity_data = {
             'id': activity.id,
             'action_type': activity.action_type,
             'actor': activity.actor,
             'target': activity.target,
             'timestamp': activity.timestamp.isoformat(),
-            'details': activity.details
+            'details': details
         }
         result.append(activity_data)
     

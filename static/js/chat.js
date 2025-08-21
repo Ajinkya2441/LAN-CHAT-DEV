@@ -114,6 +114,22 @@ function getChatBody() {
 }
 
 function renderMessage(msg, isLatest = false) {
+  // Handle system messages differently
+  if (msg.sender === 'System' || msg.is_system) {
+    let html = `<div class="message-wrapper system-message">
+      <div class="message system" data-msg-id="${msg.id}">
+        <div class="msg-content system-content" style="text-align: center; font-style: italic; color: #666; background: #f8f9fa; border-radius: 15px; padding: 8px 12px; margin: 8px 0; font-size: 0.9em;">
+          ${msg.content || ''}
+        </div>
+      </div>
+      <span class="timestamp${isLatest ? ' always' : ''}" style="text-align: center; display: block; font-size: 0.8em; color: #999;">${formatLocalTime(msg.timestamp)}</span>
+    </div>`;
+    getChatBody().append(html);
+    scrollChatToBottom();
+    try { updateConversationOrderForMessage(msg); } catch (e) {}
+    return;
+  }
+
   let fileHtml = '';
   if (msg.file) {
     if (msg.file.mimetype.startsWith('image/')) {
@@ -260,11 +276,13 @@ function updateUserListFromStatus(statusList) {
   ul.empty();
   statusList.forEach(u => {
     if (u.username === USERNAME) return; // Skip current user
-    let badge = `<span class="badge bg-danger ms-auto" id="badge-${u.username}" style="display:none;">0</span>`;
+    let badge = `<span class="badge bg-danger" id="badge-${u.username}" style="display:none;">0</span>`;
     let statusClass = u.online ? 'status-online' : 'status-offline';
     let dot = `<span class="status-dot ${statusClass}"></span>`;
-    let profilePhoto = `<img src="${getProfilePhotoUrl(u.username)}" alt="${u.username}" style="width: 40px; height: 40px; border-radius: 50%; object-fit: cover; margin-right: 8px;" onerror="this.src='/static/img/default_profile.png'">`;
-    let li = $(`<li class="list-group-item user-item d-flex align-items-center justify-content-between" data-user="${u.username}" data-search-text="${u.username.toLowerCase()}">${profilePhoto}<div class="d-flex align-items-center">${dot}<span class="ms-2">${u.username}</span></div>${badge}</li>`);
+    let profilePhoto = `<img src="${getProfilePhotoUrl(u.username)}" alt="${u.username}" style="width: 40px; height: 40px; border-radius: 50%; object-fit: cover;" onerror="this.src='/static/img/default_profile.png'">`;
+    let profileContainer = `<div class="profile-photo-container">${profilePhoto}${dot}</div>`;
+    let userInfo = `<div class="d-flex align-items-center flex-grow-1">${profileContainer}<span class="ms-2">${u.username}</span></div>`;
+    let li = $(`<li class="list-group-item user-item d-flex align-items-center justify-content-between" data-user="${u.username}" data-search-text="${u.username.toLowerCase()}">${userInfo}${badge}</li>`);
     ul.append(li);
   });
   let groupSel = $('#group-users');
@@ -652,6 +670,83 @@ $(function() {
       (currentRecipients && currentRecipients.startsWith('group-') && currentRecipients === msg.recipients)
     ) {
       renderMessage(msg);
+    }
+    
+    // 🔥 CRITICAL: Only show badge if message is TO this user FROM another user (never for own messages)
+    if (
+      msg.recipients.split(',').includes(USERNAME) &&
+      msg.sender !== USERNAME &&
+      currentRecipients !== msg.sender
+    ) {
+      console.log('📱 Showing badge for:', msg.sender);
+      showBadge(msg.sender, msg.sender);
+    }
+    
+    // Show group badge if group message from another user and not currently viewing that group
+    if (
+      msg.recipients.startsWith('group-') &&
+      msg.sender !== USERNAME &&
+      currentRecipients !== msg.recipients
+    ) {
+      // Extract group id
+      let groupId = msg.recipients.split('-')[1];
+      console.log('📱 Showing group badge for group:', groupId);
+      showGroupBadge(groupId, msg.sender);
+    }
+    
+    // 🔥 REAL-TIME SIDEBAR UPDATE: Update badges immediately for all relevant messages
+    if (msg.sender !== USERNAME) {
+      // Only update if the message affects this user
+      if (msg.recipients.split(',').includes(USERNAME) || msg.recipients.startsWith('group-')) {
+        fetchAndUpdateUnreadCounts();
+      }
+    }
+    
+    // Show browser notification if message is for this user and not from self, and window is not focused OR user is in different chat
+    if (
+      msg.recipients.split(',').includes(USERNAME) &&
+      msg.sender !== USERNAME &&
+      (!document.hasFocus() || currentRecipients !== msg.sender)
+    ) {
+      console.log('Attempting to show notification:', msg);
+      showBrowserNotification(msg);
+    }
+    
+    // --- In-app notification for mobile ---
+    if (
+      isMobileView() &&
+      msg.sender !== USERNAME &&
+      (
+        // For user chat: not currently open
+        (msg.recipients.split(',').includes(USERNAME) && currentRecipients !== msg.sender) ||
+        // For group chat: not currently open
+        (msg.recipients.startsWith('group-') && currentRecipients !== msg.recipients)
+      )
+    ) {
+      showInAppNotification(msg);
+    }
+  });
+
+  // Handle new_message event (for system messages and real-time updates)
+  socket.on('new_message', function(msg) {
+    console.log('📨 New message received:', msg);
+    // Update ordering for lists (users/groups) on every incoming message
+    try { updateConversationOrderForMessage(msg); } catch (e) {}
+    
+    // If the message is for the current open chat, render it immediately
+    if (
+      (currentRecipients === msg.sender && msg.recipients === USERNAME) ||
+      (currentRecipients === msg.recipients && msg.sender === USERNAME) ||
+      (msg.recipients.split(',').includes(USERNAME) && currentRecipients === msg.sender) ||
+      // Fix: show group message in real time if viewing that group
+      (currentRecipients && currentRecipients.startsWith('group-') && currentRecipients === msg.recipients)
+    ) {
+      renderMessage(msg);
+    }
+    
+    // Don't show badges or notifications for system messages
+    if (msg.sender === 'System' || msg.is_system) {
+      return;
     }
     
     // 🔥 CRITICAL: Only show badge if message is TO this user FROM another user (never for own messages)
@@ -2201,65 +2296,12 @@ function fetchAndUpdateUnreadCounts() {
         
     // Update individual user badges from server data
     if (data.individual_badges) {
-      // First, clear all existing badges
-      $('#user-list .user-item').each(function() {
-        const user = $(this).data('user');
-        if (user) {
-          clearBadge(user);
-        }
-      });
-      
-      // Then show badges only for users with unread messages
       Object.keys(data.individual_badges).forEach(user => {
         const count = data.individual_badges[user];
         if (count > 0) {
-          // Set the badge count directly instead of incrementing
-          let badge = $(`#badge-${user}`);
-          if (!badge.length) {
-            const $item = $(`#user-list .user-item[data-user='${user}']`);
-            badge = $(`<span class="badge bg-danger ms-auto" id="badge-${user}" style="display:none;" data-count="0"></span>`);
-            $item.append(badge);
-          }
-          badge.attr('data-count', count);
-          if (count === 1) {
-            badge.text('New');
-          } else {
-            badge.text(String(count));
-          }
-          badge.show();
+          showBadge(user, user); // Show badge with sender name
         }
-      });
-    }
-    
-    // Update group badges from server data
-    if (data.group_badges) {
-      // First, clear all existing group badges
-      $('#group-list .group-item').each(function() {
-        const groupId = $(this).data('group-id');
-        if (groupId) {
-          clearGroupBadge(groupId);
-        }
-      });
-      
-      // Then show badges only for groups with unread messages
-      Object.keys(data.group_badges).forEach(groupId => {
-        const count = data.group_badges[groupId];
-        if (count > 0) {
-          // Set the group badge count directly instead of incrementing
-          let $item = $(`#group-list .group-item[data-group-id='${groupId}']`);
-          let badge = $item.find('.group-badge');
-          if (!badge.length) {
-            badge = $(`<span class='badge bg-danger ms-auto group-badge' style='display:none;' data-count='0'></span>`);
-            $item.append(badge);
-          }
-          badge.attr('data-count', count);
-          if (count === 1) {
-            badge.text('New');
-          } else {
-            badge.text(String(count));
-          }
-          badge.show();
-        }
+        // Do NOT clear badge here; only clear when chat is opened
       });
     }
         

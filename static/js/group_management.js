@@ -928,6 +928,57 @@ function loadGroupActivity(groupId) {
                         title = 'Role Changed';
                         description = `${activity.actor} changed ${activity.target}'s role to ${activity.details ? activity.details.role : 'member'}`;
                         break;
+                    case 'photo_updated':
+                        icon = '<i class="bi bi-image text-info"></i>';
+                        title = 'Group Photo Updated';
+                        description = `${activity.actor} updated the group photo`;
+                        break;
+                    case 'photo_removed':
+                        icon = '<i class="bi bi-image-fill text-warning"></i>';
+                        title = 'Group Photo Removed';
+                        description = `${activity.actor} removed the group photo`;
+                        break;
+                    case 'group_name_changed':
+                        icon = '<i class="bi bi-pencil-square text-primary"></i>';
+                        title = 'Group Name Changed';
+                        if (activity.details) {
+                            description = `${activity.actor} changed group name from "${activity.details.old_name}" to "${activity.details.new_name}"`;
+                        } else {
+                            description = `${activity.actor} changed the group name`;
+                        }
+                        break;
+                    case 'description_added':
+                        icon = '<i class="bi bi-file-text text-success"></i>';
+                        title = 'Description Added';
+                        if (activity.details && activity.details.description) {
+                            description = `${activity.actor} added group description: "${activity.details.description}"`;
+                        } else {
+                            description = `${activity.actor} added a group description`;
+                        }
+                        break;
+                    case 'description_changed':
+                        icon = '<i class="bi bi-file-text text-info"></i>';
+                        title = 'Description Changed';
+                        if (activity.details) {
+                            description = `${activity.actor} changed group description from "${activity.details.old_description}" to "${activity.details.new_description}"`;
+                        } else {
+                            description = `${activity.actor} changed the group description`;
+                        }
+                        break;
+                    case 'description_removed':
+                        icon = '<i class="bi bi-file-text text-warning"></i>';
+                        title = 'Description Removed';
+                        description = `${activity.actor} removed the group description`;
+                        break;
+                    case 'admin_only_changed':
+                        icon = '<i class="bi bi-lock text-warning"></i>';
+                        title = 'Message Permissions Changed';
+                        if (activity.details && activity.details.admin_only) {
+                            description = `${activity.actor} restricted messaging to admins only`;
+                        } else {
+                            description = `${activity.actor} allowed all members to send messages`;
+                        }
+                        break;
                     // PIN functionality removed
                     case 'message_search':
                         icon = '<i class="bi bi-search text-info"></i>';

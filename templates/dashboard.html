@@ -593,9 +593,12 @@
                     <div style="flex: 1;"></div>
                     <div style="display: flex; align-items: center; gap: 8px; margin-left: 16px;">
                         <span style="font-size: 1rem; white-space: nowrap;">Welcome,</span>
-                        <img src="{{ username | profile_photo_url }}" alt="{{ username }}"
-                            style="width: 32px; height: 32px; border-radius: 50%; object-fit: cover; border: 2px solid rgba(255,255,255,0.3);">
-                        <span style="font-size: 1rem; white-space: nowrap;"><strong>{{ username }}</strong></span>
+                        <a href="/manage-account" style="display: flex; align-items: center; gap: 8px; text-decoration: none; color: inherit; cursor: pointer; transition: opacity 0.2s;" 
+                           onmouseover="this.style.opacity='0.8'" onmouseout="this.style.opacity='1'" title="Go to Account Management">
+                            <img src="{{ username | profile_photo_url }}" alt="{{ username }}"
+                                style="width: 32px; height: 32px; border-radius: 50%; object-fit: cover; border: 2px solid rgba(255,255,255,0.3);">
+                            <span style="font-size: 1rem; white-space: nowrap;"><strong>{{ username }}</strong></span>
+                        </a>
                     </div>
                     {% if session.get('is_admin') %}
                     <span class="admin-badge"
@@ -1298,42 +1301,6 @@
                                                 <i class="bi bi-check2-circle"></i> Update Password
                                             </button>
                                         </form>
-                                    </div>
-                                </div>
-                            </div>
-
-                            <!-- Account Statistics -->
-                            <div class="col-md-6">
-                                <div class="card">
-                                    <div class="card-header">
-                                        <h5 class="card-title mb-0">
-                                            <i class="bi bi-graph-up"></i> Activity Statistics
-                                        </h5>
-                                    </div>
-                                    <div class="card-body">
-                                        <div class="mb-3">
-                                            <label class="form-label"><strong>Total Messages Sent:</strong></label>
-                                            <p class="form-control-plaintext">{{ total_messages or 0 }}</p>
-                                        </div>
-                                        <div class="mb-3">
-                                            <label class="form-label"><strong>Total Files Uploaded:</strong></label>
-                                            <p class="form-control-plaintext">{{ total_files or 0 }}</p>
-                                        </div>
-                                        <div class="mb-3">
-                                            <label class="form-label"><strong>Groups Joined:</strong></label>
-                                            <p class="form-control-plaintext">{{ (user_groups|length) if user_groups
-                                                else 0 }}</p>
-                                        </div>
-                                        {% if user_groups and user_groups|length > 0 %}
-                                        <div class="mb-3">
-                                            <label class="form-label"><strong>Your Groups:</strong></label>
-                                            <div class="form-control-plaintext">
-                                                {% for group in user_groups %}
-                                                <span class="badge bg-info me-1">{{ group.name }}</span>
-                                                {% endfor %}
-                                            </div>
-                                        </div>
-                                        {% endif %}
                                     </div>
                                 </div>
                             </div>
