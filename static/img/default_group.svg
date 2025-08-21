@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="300" height="300" viewBox="0 0 300 300" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#233554"/>
+      <stop offset="100%" stop-color="#3a7bd5"/>
+    </linearGradient>
+  </defs>
+  <rect width="300" height="300" rx="24" fill="url(#bg)"/>
+  <!-- Group of three avatars -->
+  <circle cx="150" cy="120" r="44" fill="#ffffff" fill-opacity="0.9"/>
+  <circle cx="90" cy="150" r="32" fill="#ffffff" fill-opacity="0.8"/>
+  <circle cx="210" cy="150" r="32" fill="#ffffff" fill-opacity="0.8"/>
+  <!-- Shoulders -->
+  <path d="M60 215c18-22 46-34 90-34s72 12 90 34v20H60v-20z" fill="#ffffff" fill-opacity="0.85"/>
+</svg>
