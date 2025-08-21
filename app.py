@@ -150,6 +150,15 @@ class Message(db.Model):
         self.reactions = reactions
         self.group_id = group_id
 
+class HiddenMessage(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    msg_id = db.Column(db.Integer, db.ForeignKey('message.id'), nullable=False)
+    username = db.Column(db.String(80), db.ForeignKey('user.username'), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    __table_args__ = (
+        db.UniqueConstraint('msg_id', 'username', name='uniq_msg_user_hide'),
+    )
+
 class File(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     filename = db.Column(db.String(255), nullable=False)
@@ -994,34 +1003,62 @@ def uploaded_file(filename):
 
 @app.route('/history')
 def history():
-    """Return recent messages for the user, private chat, or group chat (no public chat)."""
+    """Return recent messages for the user, private chat, or group chat (no public chat), excluding messages the user hid."""
     import json
     if 'username' not in session:
         return jsonify([])
     username = session['username']
     filter_user = request.args.get('user')
     group_id = request.args.get('group_id')
+
+    # Exclude messages hidden by this user
+    hidden_subq = db.session.query(HiddenMessage.msg_id).filter(HiddenMessage.username == username)
+
     if group_id:
         group_room = f'group-{group_id}'
-        msgs = Message.query.filter_by(recipients=group_room).order_by(Message.timestamp.desc()).limit(50).all()
+        msgs = (
+            Message.query
+            .filter_by(recipients=group_room)
+            .filter(~Message.id.in_(hidden_subq))
+            .order_by(Message.timestamp.desc())
+            .limit(50).all()
+        )
     elif filter_user == username:
-        msgs = Message.query.filter(
-            or_(
-                Message.sender == username,
-                Message.recipients.like(f'%{username}%')
-            ),
-            Message.group_id == None
-        ).order_by(Message.timestamp.desc()).limit(50).all()
+        msgs = (
+            Message.query
+            .filter(
+                or_(
+                    Message.sender == username,
+                    Message.recipients.like(f'%{username}%')
+                ),
+                Message.group_id == None
+            )
+            .filter(~Message.id.in_(hidden_subq))
+            .order_by(Message.timestamp.desc())
+            .limit(50).all()
+        )
     elif filter_user and filter_user.startswith('group-'):
-        msgs = Message.query.filter_by(recipients=filter_user).order_by(Message.timestamp.desc()).limit(50).all()
+        msgs = (
+            Message.query
+            .filter_by(recipients=filter_user)
+            .filter(~Message.id.in_(hidden_subq))
+            .order_by(Message.timestamp.desc())
+            .limit(50).all()
+        )
     else:
-        msgs = Message.query.filter(
-            or_(
-                and_(Message.sender == username, Message.recipients.like(f'%{filter_user}%')),
-                and_(Message.sender == filter_user, Message.recipients.like(f'%{username}%'))
-            ),
-            Message.group_id == None
-        ).order_by(Message.timestamp.desc()).limit(50).all()
+        msgs = (
+            Message.query
+            .filter(
+                or_(
+                    and_(Message.sender == username, Message.recipients.like(f"%{filter_user}%")),
+                    and_(Message.sender == filter_user, Message.recipients.like(f"%{username}%"))
+                ),
+                Message.group_id == None
+            )
+            .filter(~Message.id.in_(hidden_subq))
+            .order_by(Message.timestamp.desc())
+            .limit(50).all()
+        )
     result = []
     for m in reversed(msgs):
         file_info = None
@@ -1147,32 +1184,60 @@ def upload():
 
 @app.route('/delete_message/<int:msg_id>', methods=['POST'])
 def delete_message(msg_id):
-    """Delete a message and optionally its associated file. Allow if user is sender or recipient."""
+    """Sender hard-deletes for everyone; recipient hides only for self."""
     if 'username' not in session:
         return jsonify({'success': False, 'error': 'Not logged in'}), 401
     username = session['username']
     msg = Message.query.get(msg_id)
-    # Allow delete if user is sender or recipient (private/group)
-    allowed = False
-    if msg:
-        if msg.sender == username:
-            allowed = True
-        elif username in msg.recipients.split(','):
-            allowed = True
-        elif username == 'admin':
-            allowed = True
-    if not msg or not allowed:
+    if not msg:
+        return jsonify({'success': False, 'error': 'Message not found'}), 404
+
+    # Only sender/recipient/admin can act
+    if not (msg.sender == username or username in msg.recipients.split(',') or username == 'admin'):
         return jsonify({'success': False, 'error': 'Not allowed'}), 403
-    # If message has a file, optionally delete the file too
-    if msg.file_id:
-        file = File.query.get(msg.file_id)
-        if file:
-            try:
-                os.remove(os.path.join(app.config['UPLOAD_FOLDER'], file.filename))
-            except Exception:
-                pass
-            db.session.delete(file)
-    # Store message info for real-time notification
+
+    # Sender (or admin) → hard delete for everyone
+    if username == msg.sender or username == 'admin':
+        # If message has a file, delete the file too
+        if msg.file_id:
+            file = File.query.get(msg.file_id)
+            if file:
+                try:
+                    os.remove(os.path.join(app.config['UPLOAD_FOLDER'], file.filename))
+                except Exception:
+                    pass
+                db.session.delete(file)
+        msg_data = {
+            'msg_id': msg_id,
+            'sender': msg.sender,
+            'recipients': msg.recipients,
+            'group_id': msg.group_id,
+            'deleted_by': username
+        }
+        db.session.delete(msg)
+        db.session.commit()
+
+        # Notify all relevant users
+        if msg.recipients == 'all':
+            socketio.emit('message_deleted', msg_data)
+        elif msg.recipients.startswith('group-'):
+            socketio.emit('message_deleted', msg_data, to=msg.recipients)
+        else:
+            for recipient in msg.recipients.split(','):
+                socketio.emit('message_deleted', msg_data, to=recipient.strip())
+            socketio.emit('message_deleted', msg_data, to=msg.sender)
+        return jsonify({'success': True, 'mode': 'hard'})
+
+    # Recipient (not sender) → soft delete (hide only for this user)
+    from sqlalchemy.exc import IntegrityError
+    try:
+        hide = HiddenMessage(msg_id=msg_id, username=username)
+        db.session.add(hide)
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        # Already hidden; proceed silently
+    # Notify only this user to remove it from their view
     msg_data = {
         'msg_id': msg_id,
         'sender': msg.sender,
@@ -1180,24 +1245,8 @@ def delete_message(msg_id):
         'group_id': msg.group_id,
         'deleted_by': username
     }
-    
-    db.session.delete(msg)
-    db.session.commit()
-    
-    # 🔥 REAL-TIME: Notify all relevant users about message deletion
-    if msg.recipients == 'all':
-        # Broadcast to all users for public messages
-        socketio.emit('message_deleted', msg_data)
-    elif msg.recipients.startswith('group-'):
-        # Notify group members
-        socketio.emit('message_deleted', msg_data, to=msg.recipients)
-    else:
-        # Notify private chat participants
-        for recipient in msg.recipients.split(','):
-            socketio.emit('message_deleted', msg_data, to=recipient.strip())
-        socketio.emit('message_deleted', msg_data, to=msg.sender)
-    
-    return jsonify({'success': True})
+    socketio.emit('message_deleted', msg_data, to=username)
+    return jsonify({'success': True, 'mode': 'soft'})
 
 @app.route('/delete_file/<int:file_id>', methods=['POST'])
 def delete_file(file_id):
@@ -2405,44 +2454,49 @@ def handle_group_read(data):
 
 @app.route('/clear_chat', methods=['POST'])
 def clear_chat():
-    """Clear chat history for the current user and selected chat (private chat only)."""
+    """Clear chat history only for the current user (private chat)."""
     if 'username' not in session:
         return jsonify({'success': False, 'error': 'Not logged in'}), 401
     username = session['username']
     other_user = request.form.get('user')
     if not other_user:
         return jsonify({'success': False, 'error': 'No user specified'}), 400
+
     from sqlalchemy import or_, and_
     messages = Message.query.filter(
         or_(
-            and_(getattr(Message, 'sender') == username, getattr(Message, 'recipients').like(f'%{other_user}%')),
-            and_(getattr(Message, 'sender') == other_user, getattr(Message, 'recipients').like(f'%{username}%'))
-        )
+            and_(Message.sender == username, Message.recipients.like(f"%{other_user}%")),
+            and_(Message.sender == other_user, Message.recipients.like(f"%{username}%"))
+        ),
+        Message.group_id.is_(None)
     ).all()
-    
-    # Store message IDs for real-time notification
-    deleted_msg_ids = [m.id for m in messages]
-    
+
+    # Mark all these messages as hidden for this user (soft clear)
+    from sqlalchemy.exc import IntegrityError
+    deleted_msg_ids = []
     for m in messages:
-        db.session.delete(m)
+        try:
+            db.session.add(HiddenMessage(msg_id=m.id, username=username))
+            deleted_msg_ids.append(m.id)
+        except IntegrityError:
+            db.session.rollback()
+            # Already hidden
     db.session.commit()
-    
-    # 🔥 REAL-TIME: Notify both users about chat clearing
+
+    # Notify only this user about clearing
     clear_data = {
         'cleared_by': username,
         'other_user': other_user,
         'deleted_msg_ids': deleted_msg_ids,
         'chat_type': 'private'
     }
-    
     socketio.emit('chat_cleared', clear_data, to=username)
-    socketio.emit('chat_cleared', clear_data, to=other_user)
-    
+
     return jsonify({'success': True})
 
 @app.route('/clear_group_chat', methods=['POST'])
 def clear_group_chat():
-    """Clear group chat history for the current user."""
+    """Clear group chat history only for the current user (soft clear)."""
     if 'username' not in session:
         return jsonify({'success': False, 'error': 'Not logged in'}), 401
     
@@ -2459,14 +2513,20 @@ def clear_group_chat():
     
     # Get all group messages
     messages = Message.query.filter_by(group_id=group_id).all()
-    deleted_msg_ids = [m.id for m in messages]
+    deleted_msg_ids = []
     
-    # Delete messages
+    # Mark hidden for this user instead of deleting
+    from sqlalchemy.exc import IntegrityError
     for m in messages:
-        db.session.delete(m)
+        try:
+            db.session.add(HiddenMessage(msg_id=m.id, username=username))
+            deleted_msg_ids.append(m.id)
+        except IntegrityError:
+            db.session.rollback()
+            # Already hidden
     db.session.commit()
     
-    # 🔥 REAL-TIME: Notify all group members about chat clearing
+    # Notify only this user about chat clearing
     clear_data = {
         'cleared_by': username,
         'group_id': group_id,
@@ -2474,7 +2534,7 @@ def clear_group_chat():
         'chat_type': 'group'
     }
     
-    socketio.emit('chat_cleared', clear_data, to=f'group-{group_id}')
+    socketio.emit('chat_cleared', clear_data, to=username)
     
     return jsonify({'success': True})
 
@@ -2487,10 +2547,12 @@ def unread_counts():
     from collections import defaultdict
     unread_chats = 0
     individual_badges = defaultdict(int)
+    hidden_subq = db.session.query(HiddenMessage.msg_id).filter(HiddenMessage.username == username)
     private_msgs = Message.query.filter(
         Message.recipients.like(f'%{username}%'),
         Message.status != 'read',
-        Message.group_id.is_(None)
+        Message.group_id.is_(None),
+        ~Message.id.in_(hidden_subq)
     ).all()
     for msg in private_msgs:
         # Find the sender (other user)
@@ -2502,10 +2564,12 @@ def unread_counts():
     unread_groups = 0
     group_badges = defaultdict(int)
     if group_ids:
+        hidden_subq = db.session.query(HiddenMessage.msg_id).filter(HiddenMessage.username == username)
         group_msgs = Message.query.filter(
             Message.group_id.in_(group_ids),
             Message.status != 'read',
-            Message.sender != username
+            Message.sender != username,
+            ~Message.id.in_(hidden_subq)
         ).all()
         for msg in group_msgs:
             group_badges[str(msg.group_id)] += 1
